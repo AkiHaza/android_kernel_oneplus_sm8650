@@ -102,6 +102,10 @@
 #define EVDI_INFLIGHT_POOL_MIN 64
 #define EVDI_GRALLOC_DATA_POOL_MIN 32
 
+#define EVDI_SMALL_PAYLOAD_MAX 64
+#define EVDI_SMALL_POOL_MIN 256
+#define EVDI_PCPU_SMALL_FREE_MAX 256
+
 struct evdi_device;
 
 struct evdi_gralloc_buf_user {
@@ -115,7 +119,6 @@ struct evdi_event_pool {
 	struct kmem_cache *cache;
 	struct kmem_cache *drm_cache;
 	struct kmem_cache *inflight_cache;
-	mempool_t *gralloc_buf_pool;
 	mempool_t *inflight_pool;
 	mempool_t *gralloc_data_pool;
 	atomic_t allocated;
@@ -136,6 +139,7 @@ struct evdi_event {
 	struct llist_node llist;
 	struct evdi_device *evdi;
 	atomic_t freed;
+	u8 payload_type;	
 };
 
 struct evdi_inflight_req {
@@ -169,6 +173,7 @@ struct evdi_gralloc_data {
 	int numInts;
 	struct file **data_files;
 	int *data_ints;
+	atomic_t is_kvblock;
 };
 
 struct evdi_gem_object {
@@ -238,13 +243,7 @@ struct evdi_device {
 	struct idr inflight_idr;
 	spinlock_t inflight_lock;
 #endif
-	struct evdi_percpu_gralloc __percpu	*percpu_gralloc_buf;
 	struct evdi_percpu_inflight __percpu	*percpu_inflight;
-};
-
-struct evdi_percpu_gralloc {
-	struct evdi_gralloc_buf_user	buf;
-	atomic_t			in_use;
 };
 
 struct evdi_percpu_inflight {
@@ -311,6 +310,8 @@ void evdi_event_cleanup_file(struct evdi_device *evdi, struct drm_file *file);
 int evdi_event_wait(struct evdi_device *evdi, struct drm_file *file);
 struct evdi_inflight_req;
 struct evdi_inflight_req *evdi_inflight_req_alloc(void);
+void *evdi_small_payload_alloc(gfp_t gfp);
+void evdi_small_payload_free(void *ptr);
 
 /* evdi_gem.c */
 struct evdi_gem_object *evdi_gem_alloc_object(struct drm_device *dev, size_t size);
@@ -425,13 +426,14 @@ struct evdi_perf_counters {
 	atomic64_t pool_alloc_slow;
 	atomic64_t wakeup_count;
 	atomic64_t poll_cycles;
-	atomic64_t drm_events_sent;
-	atomic64_t drm_events_dropped;
 	atomic64_t inflight_cache_hits;
 	atomic64_t callback_completions;
 	atomic64_t event_freelist_pop_hits;
 	atomic64_t event_freelist_pop_misses;
 	atomic64_t event_freelist_pushes;
+	atomic64_t event_payload_small_allocs;
+	atomic64_t event_payload_heap_allocs;
+	atomic64_t event_payload_none_allocs;
 	atomic64_t inflight_percpu_hits;
 	atomic64_t inflight_percpu_misses;
 };
