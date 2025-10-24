@@ -11,6 +11,7 @@
 
 struct evdi_event_pool global_event_pool = {0};
 static void evdi_inflight_req_release(struct kref *kref);
+void evdi_event_free_immediate(struct evdi_event *event);
 
 DEFINE_STATIC_KEY_FALSE(evdi_perf_key);
 bool evdi_perf_on;
@@ -37,6 +38,8 @@ struct evdi_pcpu_small_freelist {
 
 static struct evdi_pcpu_small_freelist __percpu *evdi_pcpu_small_freelist;
 static mempool_t *evdi_small_payload_pool;
+
+static DEFINE_PER_CPU(int, evdi_inflight_last_slot);
 
 static inline struct evdi_small_payload *evdi_small_from_data(void *p)
 {
@@ -346,10 +349,12 @@ struct evdi_event *evdi_event_alloc(struct evdi_device *evdi,
 				   int poll_id,
 				   void *data,
 				   size_t data_size,
+				   bool async,
 				   struct drm_file *owner)
 {
 	struct evdi_event *event;
 	int cur_alloc, peak, new_peak;
+	gfp_t gfp = GFP_ATOMIC;
 
 	event = evdi_pcpu_event_pop();
 	if (event) {
@@ -378,7 +383,18 @@ struct evdi_event *evdi_event_alloc(struct evdi_device *evdi,
 init_event:
 	event->type = type;
 	event->poll_id = poll_id;
-	event->data = data;
+	event->async = async;
+	if(async) {
+		if (data_size) {
+			event->data = kmemdup(data, data_size, gfp);
+			if (!event->data) {
+				evdi_event_free_immediate(event);
+				return NULL;
+			}
+		}
+	} else {
+		event->data = data;
+	}
 	event->data_size = data_size;
 	event->payload_type = 0;
 	event->next = NULL;
@@ -469,21 +485,53 @@ static void evdi_inflight_req_release(struct kref *kref)
 	atomic_dec(&global_event_pool.inflight_allocated);
 }
 
-struct evdi_inflight_req *evdi_inflight_req_alloc(void)
+struct evdi_inflight_req *evdi_inflight_req_alloc(struct evdi_device *evdi)
 {
-	struct evdi_inflight_req *req;
+	struct evdi_inflight_req *req = NULL;
+	bool from_percpu = false;
+	int sel_slot = -1;
+	struct evdi_percpu_inflight *pc;
+	int start, i;
 
-	req = mempool_alloc(global_event_pool.inflight_pool, GFP_ATOMIC);
-	if (likely(req)) {
-		memset(req, 0, sizeof(*req));
-		atomic_inc(&global_event_pool.inflight_allocated);
-		EVDI_PERF_INC64(&evdi_perf.inflight_cache_hits);
-		kref_init(&req->refcount);
-		init_completion(&req->done);
-		atomic_set(&req->from_percpu, 0);
-		atomic_set(&req->freed, 0);
-		req->reply.get_buf.gralloc_buf.gralloc = NULL;
+	if (likely(evdi && evdi->percpu_inflight)) {
+		pc = get_cpu_ptr(evdi->percpu_inflight);
+		start = this_cpu_read(evdi_inflight_last_slot) & 1;
+
+		prefetchw(&pc->req[0]);
+		prefetchw(&pc->req[1]);
+		for (i = 0; i < 2; i++) {
+			int s = (start + i) & 1;
+			if (atomic_cmpxchg(&pc->in_use[s], 0, 1) == 0) {
+				this_cpu_write(evdi_inflight_last_slot, s);
+				req = &pc->req[s];
+				from_percpu = true;
+				sel_slot = s;
+				break;
+			}
+		}
+		put_cpu_ptr(evdi->percpu_inflight);
 	}
+
+	if (unlikely(!req)) {
+		req = mempool_alloc(global_event_pool.inflight_pool, GFP_ATOMIC);
+		if (unlikely(!req))
+			return NULL;
+	}
+
+	memset(req, 0, sizeof(*req));
+	kref_init(&req->refcount);
+	init_completion(&req->done);
+	if (from_percpu) {
+		atomic_set(&req->from_percpu, 1);
+		req->percpu_slot = sel_slot;
+	} else {
+		atomic_set(&req->from_percpu, 0);
+		req->percpu_slot = -1;
+	}
+	atomic_set(&req->freed, 0);
+
+	atomic_inc(&global_event_pool.inflight_allocated);
+	EVDI_PERF_INC64(&evdi_perf.inflight_cache_hits);
 	return req;
 }
 
@@ -538,26 +586,33 @@ void evdi_event_free(struct evdi_event *event)
 	if (atomic_xchg(&event->freed, 1))
 		return;
 
+	if (event->async)
+		kfree(event->data);
+
 	call_rcu(&event->rcu, evdi_event_free_rcu);
 }
 
 static inline bool evdi_event_queue_lockfree(struct evdi_device *evdi, struct evdi_event *event)
 {
+	bool was_empty = false;
+
 	if (unlikely(atomic_read_acquire(&evdi->events.cleanup_in_progress)))
 		return false;
 
 	if (unlikely(atomic_read_acquire(&evdi->events.stopping)))
 		return false;
 
-	llist_add(&event->llist, &evdi->events.lockfree_head);
-	
+	prefetchw(&event->llist);
+	was_empty = llist_add(&event->llist, &evdi->events.lockfree_head);
+
 	atomic_inc(&evdi->events.queue_size);
 	atomic64_inc(&evdi->events.events_queued);
 	EVDI_PERF_INC64(&evdi_perf.event_queue_ops);
 	
 	evdi_smp_wmb();
 
-	if (atomic_cmpxchg(&evdi->events.wake_pending, 0, 1) == 0) {
+	if (atomic_cmpxchg(&evdi->events.wake_pending, 0, 1) == 0 &&
+			was_empty) {
 		wake_up_interruptible(&evdi->events.wait_queue);
 		EVDI_PERF_INC64(&evdi_perf.wakeup_count);
 	}
