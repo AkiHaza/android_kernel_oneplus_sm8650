@@ -2078,7 +2078,6 @@ static int qca_serdev_probe(struct serdev_device *serdev)
 
 		qcadev->bt_en = devm_gpiod_get_optional(&serdev->dev, "enable",
 					       GPIOD_OUT_LOW);
-
 		if (IS_ERR(qcadev->bt_en))
 			return dev_err_probe(&serdev->dev,
 					     PTR_ERR(qcadev->bt_en),
