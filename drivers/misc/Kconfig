@@ -622,4 +622,5 @@ source "drivers/misc/tri_state_key/Kconfig"
 source "drivers/misc/oplus_consumer_ir/Kconfig"
 source "drivers/misc/oplus_sync_fence/Kconfig"
 source "drivers/misc/vd628x/Kconfig"
+source "drivers/misc/vibrator/oplus_haptic/Kconfig"
 endmenu

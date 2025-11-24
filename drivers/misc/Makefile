@@ -94,6 +94,7 @@ obj-$(CONFIG_OPLUS_GPIO) += oplus_network_esim.o
 #ifdef OPLUS_FEATURE_CHG_BASIC
 obj-$(CONFIG_AW8697_HAPTIC) += vibrator/aw8697_haptic/
 obj-$(CONFIG_SIH_VIBRATOR) += vibrator/si_haptic/
+obj-$(CONFIG_OPLUS_HAPTIC_COMMON) += vibrator/oplus_haptic/
 #endif
 obj-$(CONFIG_OPLUS_POWER_NOTIFIER) += oplus_power_notifier/
 
