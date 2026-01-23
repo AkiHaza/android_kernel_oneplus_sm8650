@@ -19,6 +19,7 @@
 #include <linux/compat.h>
 #include <linux/sched/signal.h>
 #include <linux/errno.h>
+#include <linux/cpu_boost.h>
 
 static int evdi_queue_create_event_with_id(struct evdi_device *evdi, struct drm_evdi_gbm_create_buff *params, struct drm_file *owner, int poll_id);
 int evdi_queue_destroy_event(struct evdi_device *evdi, int id, struct drm_file *owner);
@@ -577,6 +578,7 @@ int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file)
 	event = evdi_event_dequeue(evdi);
 	if (likely(event)) {
 		cmd->event = event->type;
+		cpu_boost_kick(4);
 		cmd->poll_id = event->poll_id;
 		payload_size = evdi_event_serialize_payload(event,
 			payload_buf, sizeof(payload_buf));
@@ -611,6 +613,7 @@ int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file)
 		return -EAGAIN;
 
 	cmd->event = event->type;
+	cpu_boost_kick(4);
 	cmd->poll_id = event->poll_id;
 
 	payload_size = evdi_event_serialize_payload(event, payload_buf,
