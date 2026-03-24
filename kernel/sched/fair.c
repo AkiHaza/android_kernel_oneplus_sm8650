@@ -12947,7 +12947,6 @@ static int sched_balance_newidle(struct rq *this_rq, struct rq_flags *rf)
 
 	if (!READ_ONCE(this_rq->rd->overload) ||
 	    this_rq->avg_idle < sd->max_newidle_lb_cost) {
-
 		update_next_balance(sd, &next_balance);
 		rcu_read_unlock();
 		goto out;
@@ -12998,6 +12997,7 @@ static int sched_balance_newidle(struct rq *this_rq, struct rq_flags *rf)
 
 			t1 = sched_clock_cpu(this_cpu);
 			domain_cost = t1 - t0;
+
 			curr_cost += domain_cost;
 			t0 = t1;
 
