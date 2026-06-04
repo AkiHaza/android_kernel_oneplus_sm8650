@@ -25,7 +25,7 @@ endif
 # in coverage traces.
 KCOV_INSTRUMENT_softirq.o := n
 # Avoid KCSAN instrumentation in softirq ("No shared variables, all the data
-# are CPU local" => assume no data races), to reduce overhead in interrupts.
+# are CPU local" =&gt; assume no data races), to reduce overhead in interrupts.
 KCSAN_SANITIZE_softirq.o = n
 # These are called from save_stack_trace() on slub debug path,
 # and produce insane amounts of uninteresting coverage.
@@ -146,7 +146,7 @@ $(obj)/config_data.gz: $(obj)/config_data FORCE
 
 filechk_cat = cat $<
 
-$(obj)/config_data: arch/arm64/configs/gki-stock_defconfig FORCE
+$(obj)/config_data: $(KCONFIG_CONFIG) FORCE
 	$(call filechk,cat)
 
 $(obj)/kheaders.o: $(obj)/kheaders_data.tar.xz
