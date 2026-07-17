@@ -12,7 +12,6 @@
 #include <linux/oom.h>
 #include <linux/sched/mm.h>
 #include <linux/sort.h>
-#include <linux/vmpressure.h>
 #include <uapi/linux/sched/types.h>
 #include <linux/cpu_boost.h>
 #include <soc/qcom/dcvs_boost.h>
@@ -451,23 +450,14 @@ void simple_lmk_mm_freed(struct mm_struct *mm)
 	read_unlock(&mm_free_lock);
 }
 
-static int simple_lmk_vmpressure_cb(struct notifier_block *nb,
-				    unsigned long pressure, void *data)
+void simple_lmk_reclaim_needed(void)
 {
-	if (pressure == 100) {
-		atomic_set(&needs_reclaim, 1);
-		smp_mb__after_atomic();
-		if (waitqueue_active(&oom_waitq))
-			wake_up(&oom_waitq);
-	}
-
-	return NOTIFY_OK;
+	atomic_set(&needs_reclaim, 1);
+	smp_mb__after_atomic();
+	if (waitqueue_active(&oom_waitq))
+		wake_up(&oom_waitq);
 }
-
-static struct notifier_block vmpressure_notif = {
-	.notifier_call = simple_lmk_vmpressure_cb,
-	.priority = INT_MAX
-};
+EXPORT_SYMBOL_GPL(simple_lmk_reclaim_needed);
 
 /* Initialize Simple LMK when lmkd in Android writes to the minfree parameter */
 static int simple_lmk_init_set(const char *val, const struct kernel_param *kp)
@@ -482,7 +472,6 @@ static int simple_lmk_init_set(const char *val, const struct kernel_param *kp)
 		thread = kthread_run(simple_lmk_reclaim_thread, NULL,
 				     "simple_lmkd");
 		BUG_ON(IS_ERR(thread));
-		BUG_ON(vmpressure_notifier_register(&vmpressure_notif));
 	}
 
 	return 0;
