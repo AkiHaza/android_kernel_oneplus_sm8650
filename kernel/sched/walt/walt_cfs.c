@@ -1366,7 +1366,7 @@ void walt_cfs_tick(struct rq *rq)
 	 * see if we can run any other task including MVP tasks.
 	 */
 	if (((skip_mvp != wrq->skip_mvp) ||
-		(wrq->mvp_tasks.next != &wts->mvp_list)) && rq->cfs.h_nr_running > 1)
+		(wrq->mvp_tasks.next != &wts->mvp_list)) && rq->cfs.h_nr_queued > 1)
 		resched_curr(rq);
 
 out:
@@ -1432,16 +1432,6 @@ preempt:
 	trace_walt_cfs_mvp_wakeup_preempt(p, wts_p, walt_cfs_mvp_task_limit(p));
 }
 
-#ifdef CONFIG_FAIR_GROUP_SCHED
-/* Walk up scheduling entities hierarchy */
-#define for_each_sched_entity(se) \
-		for (; se; se = se->parent)
-#else	/* !CONFIG_FAIR_GROUP_SCHED */
-#define for_each_sched_entity(se) \
-		for (; se; se = NULL)
-#endif
-
-extern void set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se);
 static void walt_cfs_replace_next_task_fair(void *unused, struct rq *rq, struct task_struct **p,
 					    struct sched_entity **se, bool *repick, bool simple,
 					    struct task_struct *prev)
@@ -1449,7 +1439,6 @@ static void walt_cfs_replace_next_task_fair(void *unused, struct rq *rq, struct 
 	struct walt_rq *wrq = &per_cpu(walt_rq, cpu_of(rq));
 	struct walt_task_struct *wts;
 	struct task_struct *mvp;
-	struct cfs_rq *cfs_rq;
 
 	if (unlikely(walt_disabled))
 		return;
@@ -1485,16 +1474,7 @@ static void walt_cfs_replace_next_task_fair(void *unused, struct rq *rq, struct 
 	if (!wrq->mvp_arrival_time)
 		wrq->mvp_arrival_time = rq->clock;
 
-	if (simple) {
-		for_each_sched_entity((*se)) {
-			/*
-			 * TODO If CFS_BANDWIDTH is enabled, we might pick
-			 * from a throttled cfs_rq
-			 */
-			cfs_rq = cfs_rq_of(*se);
-			set_next_entity(cfs_rq, *se);
-		}
-	}
+	/* The scheduler installs the selected entity after this hook returns. */
 
 	if ((*p) && (*p) != prev && ((*p)->on_cpu == 1 || (*p)->on_rq == 0 ||
 				     (*p)->on_rq == TASK_ON_RQ_MIGRATING ||

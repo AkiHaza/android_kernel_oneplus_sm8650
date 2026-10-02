@@ -5729,7 +5729,9 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 		SCHED_WARN_ON(delay && se->sched_delayed);
 
-		if (sched_feat(DELAY_DEQUEUE) && delay &&
+		/* WALT requires sleeping tasks to leave the runqueue immediately. */
+		if (!IS_ENABLED(CONFIG_SCHED_WALT) &&
+		    sched_feat(DELAY_DEQUEUE) && delay &&
 		    !entity_eligible(cfs_rq, se)) {
 			update_load_avg(cfs_rq, se, 0);
 			update_entity_lag(cfs_rq, se);
@@ -8980,7 +8982,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	struct sched_entity *nse, *se = &curr->se, *pse = &p->se;
 	struct cfs_rq *cfs_rq = task_cfs_rq(curr);
 	int cse_is_idle, pse_is_idle;
-	bool ignore = false;
+	bool ignore = false, preempt = false;
 
 	if (unlikely(se == pse))
 		return;
@@ -9048,6 +9050,17 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	 */
 	if (pse->sched_delayed)
 		goto update;
+
+	/* EEVDF has no CFS wakeup granularity; WALT does not use that argument. */
+	trace_android_rvh_check_preempt_wakeup(rq, p, &preempt, &ignore,
+			wake_flags, se, pse, cfs_rq->next == pse, 0);
+	if (preempt) {
+		cancel_protect_slice(se);
+		resched_curr(rq);
+		return;
+	}
+	if (ignore)
+		return;
 
 	/*
 	 * If @p has a shorter slice than current and @p is eligible, override
@@ -9173,6 +9186,7 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 {
 	struct sched_entity *se = NULL;
 	struct task_struct *p = NULL;
+	bool repick = false;
 	int new_tasks;
 
 again:
@@ -9180,6 +9194,7 @@ again:
 	if (!p)
 		goto idle;
 	se = &p->se;
+	trace_android_rvh_replace_next_task_fair(rq, &p, &se, &repick, false, prev);
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	if (prev->sched_class != &fair_sched_class)

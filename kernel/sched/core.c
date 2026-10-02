@@ -2158,6 +2158,7 @@ static inline void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 	 * in ->enqueue_task().
 	 */
 	uclamp_rq_inc(rq, p, flags);
+	trace_android_rvh_enqueue_task(rq, p, flags);
 
 	p->sched_class->enqueue_task(rq, p, flags);
 
@@ -2191,6 +2192,7 @@ inline bool dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 	 * and mark the task ->sched_delayed.
 	 */
 	uclamp_rq_dec(rq, p);
+	trace_android_rvh_dequeue_task(rq, p, flags);
 	return p->sched_class->dequeue_task(rq, p, flags);
 }
 
@@ -9615,6 +9617,26 @@ void idle_task_exit(void)
 
 	/* finish_cpu(), as ran on the BP, will clean up the active_mm state */
 }
+
+#if IS_ENABLED(CONFIG_SCHED_WALT)
+/* Pick a task for WALT CPU draining without installing it as current. */
+struct task_struct *pick_migrate_task(struct rq *rq)
+{
+	const struct sched_class *class;
+	struct task_struct *p;
+
+	lockdep_assert_rq_held(rq);
+	for_each_class(class) {
+		p = class->pick_task(rq);
+		if (p)
+			return p;
+	}
+
+	/* The idle class always supplies a task. */
+	BUG();
+}
+EXPORT_SYMBOL_GPL(pick_migrate_task);
+#endif
 
 static int __balance_push_cpu_stop(void *arg)
 {

@@ -496,7 +496,7 @@ static bool is_ed_task_present(struct rq *rq, u64 wallclock, struct task_struct 
 
 	wrq->ed_task = NULL;
 
-	if (!is_ed_enabled() || !rq->cfs.h_nr_running)
+	if (!is_ed_enabled() || !rq->cfs.h_nr_queued)
 		return false;
 
 	list_for_each_entry(p, &rq->cfs_tasks, se.group_node) {
@@ -5504,11 +5504,26 @@ static void walt_remove_cpufreq_efficiencies_available(void)
 	}
 }
 
+/* Read a fresh root domain: rebuilding topology can retire the previous one. */
+static bool walt_perf_domains_ready(void)
+{
+	struct root_domain *rd;
+	bool ready;
+
+	cpus_read_lock();
+	rcu_read_lock();
+	rd = READ_ONCE(cpu_rq(cpumask_first(cpu_active_mask))->rd);
+	ready = rcu_access_pointer(rd->pd) != NULL;
+	rcu_read_unlock();
+	cpus_read_unlock();
+
+	return ready;
+}
+
 static void walt_init(struct work_struct *work)
 {
 	struct ctl_table_header *hdr;
 	static atomic_t already_inited = ATOMIC_INIT(0);
-	struct root_domain *rd = cpu_rq(cpumask_first(cpu_active_mask))->rd;
 	int i;
 
 	might_sleep();
@@ -5534,7 +5549,7 @@ static void walt_init(struct work_struct *work)
 
 	wait_for_completion_interruptible(&tick_sched_clock_completion);
 
-	if (!rcu_access_pointer(rd->pd)) {
+	if (!walt_perf_domains_ready()) {
 		/*
 		 * perf domains not properly configured.  this is a must as
 		 * create_util_to_cost depends on rd->pd being properly
@@ -5553,10 +5568,9 @@ static void walt_init(struct work_struct *work)
 	 * see walt_find_energy_efficient_cpu(), and
 	 * create_util_to_cost().
 	 */
-	if (!rcu_access_pointer(rd->pd) && num_sched_clusters > 1)
+	if (!walt_perf_domains_ready() && num_sched_clusters > 1)
 		WALT_BUG(WALT_BUG_WALT, NULL,
-			 "root domain's perf-domain values not initialized rd->pd=%d.",
-			 rd->pd);
+			 "root domain's perf-domain values not initialized");
 
 	hdr = register_sysctl_table(walt_base_table);
 	kmemleak_not_leak(hdr);
