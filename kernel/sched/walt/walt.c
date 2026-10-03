@@ -5293,10 +5293,9 @@ static void rebuild_sd_workfn(struct work_struct *work)
 		if (cpu_dev && cpu_dev->em_pd)
 			continue;
 
-		WARN_ONCE(true, "must wait for perf domains to be created");
-		schedule_work(&rebuild_sd_work);
-
-		/* do not rebuild domains yet, and do not complete this action */
+		/* An incomplete EM must not keep WALT initialization pending forever. */
+		pr_warn_once("WALT: CPU%d has no energy model; continuing without EAS\n", cpu);
+		complete(&rebuild_domains_completion);
 		return;
 	}
 
@@ -5590,8 +5589,7 @@ static void walt_init(struct work_struct *work)
 	 * create_util_to_cost().
 	 */
 	if (!walt_perf_domains_ready() && num_sched_clusters > 1)
-		WALT_BUG(WALT_BUG_WALT, NULL,
-			 "root domain's perf-domain values not initialized");
+		pr_warn("WALT: root-domain performance domains unavailable; EAS disabled\n");
 
 	hdr = register_sysctl_table(walt_base_table);
 	kmemleak_not_leak(hdr);
