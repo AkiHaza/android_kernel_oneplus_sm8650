@@ -2889,6 +2889,7 @@ static void walt_update_cluster_topology(void)
 		if (policy) {
 			cluster->max_possible_freq = policy->cpuinfo.max_freq;
 			cluster->max_freq = policy->max;
+			cluster->walt_internal_freq_limit = policy->max;
 			for_each_cpu(i, &cluster->cpus) {
 				wrq = &per_cpu(walt_rq, i);
 				cpumask_copy(&wrq->freq_domain_cpumask,
@@ -4905,12 +4906,15 @@ static void android_rvh_wake_up_new_task(void *unused, struct task_struct *new)
 
 static void walt_cpu_frequency_limits(void *unused, struct cpufreq_policy *policy)
 {
+	struct walt_sched_cluster *cluster;
 	int cpu;
 
 	if (unlikely(walt_disabled))
 		return;
 
-	cpu_cluster(policy->cpu)->max_freq = policy->max;
+	cluster = cpu_cluster(policy->cpu);
+	cluster->max_freq = policy->max;
+	has_internal_freq_limit_changed(cluster);
 	for_each_cpu(cpu, policy->related_cpus)
 		update_cpu_capacity_helper(cpu);
 }
