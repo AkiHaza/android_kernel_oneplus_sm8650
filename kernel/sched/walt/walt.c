@@ -5540,17 +5540,29 @@ static bool walt_perf_domains_ready(void)
 	return ready;
 }
 
+enum walt_init_phase {
+	WALT_INIT_PENDING,
+	WALT_INIT_DEFERRED,
+	WALT_INIT_STARTED,
+};
+
+static atomic_t walt_init_state = ATOMIC_INIT(WALT_INIT_PENDING);
+static bool walt_module_ready;
+static void walt_init(struct work_struct *work);
+static DECLARE_WORK(walt_init_work, walt_init);
+
 static void walt_init(struct work_struct *work)
 {
 	struct ctl_table_header *hdr;
-	static atomic_t already_inited = ATOMIC_INIT(0);
 	int i;
 
 	might_sleep();
 
-	if (atomic_cmpxchg(&already_inited, 0, 1))
+	if (atomic_cmpxchg(&walt_init_state, WALT_INIT_PENDING,
+			   WALT_INIT_STARTED) != WALT_INIT_PENDING)
 		return;
 
+	pr_info("WALT: initialization started\n");
 	walt_tunables();
 
 	register_syscore_ops(&walt_syscore_ops);
@@ -5566,6 +5578,7 @@ static void walt_init(struct work_struct *work)
 	walt_cfs_init();
 	walt_halt_init();
 	walt_mvp_lock_ordering_init();
+	pr_info("WALT: initialization hooks ready\n");
 
 	wait_for_completion(&tick_sched_clock_completion);
 
@@ -5578,8 +5591,11 @@ static void walt_init(struct work_struct *work)
 		schedule_delayed_work(&rebuild_sd_work, 0);
 		wait_for_completion(&rebuild_domains_completion);
 	}
+	pr_info("WALT: initialization performance domains ready\n");
 	walt_remove_cpufreq_efficiencies_available();
+	pr_info("WALT: initialization entering stop_machine\n");
 	stop_machine(walt_init_stop_handler, NULL, NULL);
+	pr_info("WALT: initialization left stop_machine\n");
 
 	/*
 	 * validate root-domain perf-domain is configured properly
@@ -5607,9 +5623,48 @@ static void walt_init(struct work_struct *work)
 	}
 
 	topology_clear_scale_freq_source(SCALE_FREQ_SOURCE_ARCH, cpu_online_mask);
+	pr_info("WALT: initialization completed\n");
 }
 
-static DECLARE_WORK(walt_init_work, walt_init);
+static int walt_set_init_defer(const char *val, const struct kernel_param *kp)
+{
+	bool defer = true;
+	int state, ret;
+
+	if (val) {
+		ret = kstrtobool(val, &defer);
+		if (ret)
+			return ret;
+	}
+
+	do {
+		state = atomic_read(&walt_init_state);
+		if (state == WALT_INIT_STARTED)
+			return defer ? -EBUSY : 0;
+	} while (atomic_cmpxchg(&walt_init_state, state,
+			      defer ? WALT_INIT_DEFERRED : WALT_INIT_PENDING) != state);
+
+	/* The setter may run during boot parameter parsing, before module_init. */
+	if (!defer && READ_ONCE(walt_module_ready) && READ_ONCE(topology_update_done))
+		schedule_work(&walt_init_work);
+
+	return 0;
+}
+
+static int walt_get_init_defer(char *buffer, const struct kernel_param *kp)
+{
+	return scnprintf(buffer, PAGE_SIZE, "%c\n",
+			 atomic_read(&walt_init_state) == WALT_INIT_DEFERRED ? 'Y' : 'N');
+}
+
+static const struct kernel_param_ops walt_init_defer_ops = {
+	.flags = KERNEL_PARAM_OPS_FL_NOARG,
+	.set = walt_set_init_defer,
+	.get = walt_get_init_defer,
+};
+module_param_cb(init_defer, &walt_init_defer_ops, NULL, 0644);
+MODULE_PARM_DESC(init_defer, "Defer WALT initialization until cleared");
+
 static void android_vh_update_topology_flags_workfn(void *unused, void *unused2)
 {
 	schedule_work(&walt_init_work);
@@ -5627,6 +5682,7 @@ static int walt_module_init(void)
 
 	register_trace_android_vh_update_topology_flags_workfn(
 			android_vh_update_topology_flags_workfn, NULL);
+	WRITE_ONCE(walt_module_ready, true);
 
 	if (topology_update_done)
 		schedule_work(&walt_init_work);
