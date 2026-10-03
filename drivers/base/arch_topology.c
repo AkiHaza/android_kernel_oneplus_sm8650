@@ -337,6 +337,48 @@ void topology_normalize_cpu_scale(void)
 	}
 }
 
+static bool __init topology_has_yaap_pineapple_capacities(void)
+{
+	static const u32 capacities[] = { 488, 488, 980, 980, 983, 983, 983, 1024 };
+	static const u32 domains[] = { 0, 0, 3, 3, 3, 1, 1, 2 };
+	struct of_phandle_args args;
+	struct device_node *node;
+	u32 capacity;
+	int cpu, ret;
+	bool match;
+
+	if (!IS_ENABLED(CONFIG_SCHED_WALT) ||
+	    !of_machine_is_compatible("qcom,pineapple") ||
+	    num_possible_cpus() != ARRAY_SIZE(capacities))
+		return false;
+
+	for (cpu = 0; cpu < ARRAY_SIZE(capacities); cpu++) {
+		node = of_get_cpu_node(cpu, NULL);
+		if (!node)
+			return false;
+
+		ret = of_property_read_u32(node, "capacity-dmips-mhz", &capacity);
+		if (ret || capacity != capacities[cpu]) {
+			of_node_put(node);
+			return false;
+		}
+
+		ret = of_parse_phandle_with_args(node, "qcom,freq-domain",
+					 "#freq-domain-cells", 0, &args);
+		of_node_put(node);
+		if (ret)
+			return false;
+
+		match = args.args_count == 1 && args.args[0] == domains[cpu] &&
+			of_device_is_compatible(args.np, "qcom,cpufreq-epss");
+		of_node_put(args.np);
+		if (!match)
+			return false;
+	}
+
+	return true;
+}
+
 bool __init topology_parse_cpu_capacity(struct device_node *cpu_node, int cpu)
 {
 	struct clk *cpu_clk;
@@ -350,6 +392,18 @@ bool __init topology_parse_cpu_capacity(struct device_node *cpu_node, int cpu)
 	ret = of_property_read_u32(cpu_node, "capacity-dmips-mhz",
 				   &cpu_capacity);
 	if (!ret) {
+		/*
+		 * YAAP's measured Pineapple capacities differ by 0.3% within
+		 * one frequency domain. WALT needs an Energy Model, which
+		 * requires equal CPU capacities in each domain. Recognize only
+		 * this firmware layout and align its A720 capacities before
+		 * either early or CPUFreq-based capacity normalization.
+		 */
+		if (cpu_capacity == 980 && topology_has_yaap_pineapple_capacities()) {
+			cpu_capacity = 983;
+			pr_info("WALT: CPU%d firmware capacity adjusted from 980 to 983\n", cpu);
+		}
+
 		if (!raw_capacity) {
 			raw_capacity = kcalloc(num_possible_cpus(),
 					       sizeof(*raw_capacity),

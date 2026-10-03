@@ -15,6 +15,7 @@
 #include <linux/cpumask.h>
 #include <linux/arch_topology.h>
 #include <linux/cpu.h>
+#include <linux/energy_model.h>
 
 #include <trace/hooks/sched.h>
 #include <trace/hooks/cpufreq.h>
@@ -2792,8 +2793,15 @@ static void build_cpu_array(void)
 
 static void walt_get_possible_siblings(int cpuid, struct cpumask *cluster_cpus)
 {
+	struct em_perf_domain *pd = em_cpu_get(cpuid);
 	int cpu;
 	struct cpu_topology *cpu_topo, *cpuid_topo = &cpu_topology[cpuid];
+
+	/* Firmware cluster IDs can span multiple frequency domains. */
+	if (pd) {
+		cpumask_copy(cluster_cpus, em_span_cpus(pd));
+		return;
+	}
 
 	if (cpuid_topo->cluster_id == -1)
 		return;
@@ -5267,8 +5275,9 @@ static void android_rvh_update_thermal_stats(void *unused, int cpu)
 }
 
 static DECLARE_COMPLETION(rebuild_domains_completion);
+static bool walt_perf_domains_ready(void);
 static void rebuild_sd_workfn(struct work_struct *work);
-static DECLARE_WORK(rebuild_sd_work, rebuild_sd_workfn);
+static DECLARE_DELAYED_WORK(rebuild_sd_work, rebuild_sd_workfn);
 
 /** rebuild_sd_workfn
  *
@@ -5285,18 +5294,25 @@ static void rebuild_sd_workfn(struct work_struct *work)
 
 	for_each_possible_cpu(cpu) {
 		cpu_dev = get_cpu_device(cpu);
-		if (cpu_dev->em_pd)
+		if (cpu_dev && cpu_dev->em_pd)
 			continue;
 
-		WARN_ONCE(true, "must wait for perf domains to be created");
-		schedule_work(&rebuild_sd_work);
-
-		/* do not rebuild domains yet, and do not complete this action */
-		return;
+		pr_warn_once("WALT: waiting for CPU%d energy model\n", cpu);
+		goto retry;
 	}
 
 	rebuild_sched_domains();
+	if (!walt_perf_domains_ready()) {
+		pr_warn_once("WALT: waiting for root-domain performance domains\n");
+		goto retry;
+	}
+
 	complete(&rebuild_domains_completion);
+	return;
+
+retry:
+	/* Keep WALT disabled until every required performance domain is ready. */
+	schedule_delayed_work(&rebuild_sd_work, msecs_to_jiffies(1000));
 }
 
 static void walt_do_sched_yield(void *unused, struct rq *rq)
@@ -5547,7 +5563,7 @@ static void walt_init(struct work_struct *work)
 	walt_halt_init();
 	walt_mvp_lock_ordering_init();
 
-	wait_for_completion_interruptible(&tick_sched_clock_completion);
+	wait_for_completion(&tick_sched_clock_completion);
 
 	if (!walt_perf_domains_ready()) {
 		/*
@@ -5555,8 +5571,8 @@ static void walt_init(struct work_struct *work)
 		 * create_util_to_cost depends on rd->pd being properly
 		 * initialized.
 		 */
-		schedule_work(&rebuild_sd_work);
-		wait_for_completion_interruptible(&rebuild_domains_completion);
+		schedule_delayed_work(&rebuild_sd_work, 0);
+		wait_for_completion(&rebuild_domains_completion);
 	}
 	walt_remove_cpufreq_efficiencies_available();
 	stop_machine(walt_init_stop_handler, NULL, NULL);
