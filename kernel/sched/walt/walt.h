@@ -1238,7 +1238,7 @@ static inline bool is_walt_sentinel(void)
 ({										\
 	if (is_walt_sentinel()) {						\
 		if (walt_debug_feat_print(feat))				\
-			printk_deferred("WALT-BUG " format, args);		\
+			printk_deferred("WALT-BUG " format, ##args);	\
 		if (walt_debug_feat_panic(feat)) {				\
 			if (p)							\
 				walt_task_dump(p);				\
