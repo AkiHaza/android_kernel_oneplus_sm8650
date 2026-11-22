@@ -2,7 +2,8 @@ name: Watch waffle OTA and sync seventeen
 
 on:
   schedule:
-    - cron: "0 0 * * *"
+    # Run after the modules mirror's usual 00:00 UTC sync.
+    - cron: "37 0 * * *"
   workflow_dispatch:
 
 permissions:
@@ -15,6 +16,8 @@ concurrency:
 jobs:
   sync-seventeen:
     name: Sync seventeen from YAAP
+    outputs:
+      kernel_commit: ${{ steps.sync.outputs.kernel_commit }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -22,6 +25,7 @@ jobs:
           fetch-depth: 0
 
       - name: Merge YAAP updates into seventeen
+        id: sync
         run: |
           set -euo pipefail
           git remote add upstream https://github.com/yaap/kernel_oneplus_sm8650.git
@@ -32,6 +36,13 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git merge --no-edit -X theirs refs/remotes/upstream/seventeen
           git push origin HEAD:refs/heads/seventeen
+          echo "kernel_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  kernel-prebuilt:
+    needs: sync-seventeen
+    uses: ./.github/workflows/kernel-prebuilt.yml
+    with:
+      kernel_commit: ${{ needs.sync-seventeen.outputs.kernel_commit }}
 
   tag-waffle-ota:
     name: Tag new waffle OTA metadata

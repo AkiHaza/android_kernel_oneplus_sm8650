@@ -1,0 +1,159 @@
+name: Release YAAP external module build files
+
+on:
+  workflow_call:
+    inputs:
+      kernel_commit:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  KERNEL_COMMIT: ${{ inputs.kernel_commit }}
+  MODULES_REPO: ${{ github.repository }}-modules
+  TOOLCHAIN_URL: https://github.com/AkiHaza/Floran-Kernel/releases/download/toolchain-r596125/linux-x86-refs_heads_android17-release-clang-r596125.tar.gz
+  TOOLCHAIN_SHA256: c8920e2a9d12e8fe31de02f20b22fd3df380028837c047ddf06a8afab0af4fd0
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      modules_commit: ${{ steps.plan.outputs.modules_commit }}
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      - name: Pin the synced pair and check for a published prebuild
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ $KERNEL_COMMIT =~ ^[0-9a-f]{40}$ ]]
+          head_sha() { gh api "repos/$1/git/ref/heads/seventeen" --jq .object.sha; }
+          upstream=$(head_sha yaap/kernel_oneplus_sm8650-modules)
+          modules=$(head_sha "$MODULES_REPO")
+          [[ $modules =~ ^[0-9a-f]{40}$ && $upstream =~ ^[0-9a-f]{40}$ ]]
+          if [[ $modules != "$upstream" ]]; then
+            # The two mirrors sync independently. Never publish a known stale pair.
+            if [[ $(gh api "repos/$MODULES_REPO/compare/$upstream...$modules" --jq .status) != ahead ]]; then
+              echo "::error::Modules mirror has not synced $upstream yet; rerun after its sync."
+              exit 1
+            fi
+          fi
+          tag="yaap-kbuild-v1-${KERNEL_COMMIT:0:12}-${modules:0:12}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "modules_commit=$modules" >> "$GITHUB_OUTPUT"
+          status=$(curl -sS --retry 3 -o release.json -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$tag")
+          case $status in
+            404) build=true ;;
+            200)
+              if jq -e .draft release.json >/dev/null; then
+                build=true
+              else
+                jq -e '([.assets[] | select(.state == "uploaded" and .size > 0) | .name] |
+                  contains(["yaap-kernel-context.tar.gz", "manifest.json", "yaap-config.txt", "SHA256SUMS"]))' release.json >/dev/null
+                build=false
+              fi ;;
+            *) echo "::error::Release lookup returned HTTP $status"; exit 1 ;;
+          esac
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "Prebuild: \`$tag\`; build required: $build" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      MODULES_COMMIT: ${{ needs.resolve.outputs.modules_commit }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/yaap-prebuilt
+          persist-credentials: false
+
+      - name: Check the archive contract
+        run: python3 .github/yaap-prebuilt/test_pack.py -v
+
+      - name: Make room on the disposable hosted runner and install build tools
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android/sdk /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bc bison flex libdw-dev libelf-dev libssl-dev \
+            pahole binutils cpio kmod lz4 rsync zstd libncurses-dev
+          # Linking a ThinLTO kernel with DWARF/BTF can exceed runner RAM.
+          if (( $(awk '/SwapTotal:/ {print $2}' /proc/meminfo) < 8*1024*1024 )); then
+            sudo fallocate -l 8G "$RUNNER_TEMP/kbuild.swap"
+            sudo chmod 600 "$RUNNER_TEMP/kbuild.swap"
+            sudo mkswap "$RUNNER_TEMP/kbuild.swap"
+            sudo swapon "$RUNNER_TEMP/kbuild.swap"
+          fi
+          df -h "$RUNNER_TEMP"
+
+      - name: Fetch matching sources and verified Floran Clang
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          checkout_sha() {
+            git init -q "$3"
+            git -C "$3" fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$1.git" "$2"
+            git -C "$3" checkout -q --detach FETCH_HEAD
+            test "$(git -C "$3" rev-parse HEAD)" = "$2"
+          }
+          checkout_sha "$GITHUB_REPOSITORY" "$KERNEL_COMMIT" sm8650
+          checkout_sha "$MODULES_REPO" "$MODULES_COMMIT" sm8650-modules
+          test -s sm8650/drivers/base/touchpanel_notify/Kconfig
+          curl -fL --retry 5 --retry-all-errors "$TOOLCHAIN_URL" -o clang.tar.gz
+          echo "$TOOLCHAIN_SHA256  clang.tar.gz" | sha256sum -c -
+          mkdir toolchain
+          tar -xzf clang.tar.gz -C toolchain
+          rm clang.tar.gz
+          clang=$(find "$RUNNER_TEMP/toolchain" -path '*/bin/clang' \( -type f -o -type l \) -print -quit)
+          test -x "$clang"
+          dirname "$clang" >> "$GITHUB_PATH"
+          "$clang" --version
+
+      - name: Build, pack and test the restored context
+        run: bash .github/yaap-prebuilt/build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yaap-kbuild-release
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 3
+
+  publish:
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: yaap-kbuild-release
+          path: dist
+      - name: Publish verified assets together at the kernel commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c SHA256SUMS
+          # Resume an interrupted draft, but never replace a published release.
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
+            test "$draft" = true
+          else
+            gh release create "$TAG" --target "$KERNEL_COMMIT" --draft --title "$TAG" \
+              --notes "ARM64 external module build files for $(jq -r .kernel.release manifest.json). Kernel: $KERNEL_COMMIT; modules: $(jq -r .modules.commit manifest.json). Stock YAAP configuration; not a flashable image."
+          fi
+          gh release upload "$TAG" yaap-kernel-context.tar.gz yaap-config.txt manifest.json SHA256SUMS --clobber
+          gh release edit "$TAG" --draft=false --latest=false
